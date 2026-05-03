@@ -9,9 +9,9 @@
 #include <ArduinoJson.h>
 
 // --- Configuración OTA (GitHub) ---
-String currentVersion = "v1.0.0"; // ⚠️ CAMBIA ESTO EN CADA RELEASE (ej. v1.0.1, v1.0.2)
+String currentVersion = "v1.0.1"; // ⚠️ CAMBIA ESTO EN CADA RELEASE (ej. v1.0.1, v1.0.2)
 // Reemplaza con tu usuario y el nombre del repositorio que creamos
-String githubAPIURL = "https://api.github.com/repos/TU_USUARIO/Monitor-Temperatura-Laser-CO2/releases/latest";
+String githubAPIURL = "https://api.github.com/repos/JesPezz/Monitor-Temperatura-Laser-C02/releases/latest";
 
 unsigned long lastOTACheck = 0;
 const unsigned long OTA_INTERVAL = 43200000; // Revisar cada 12 horas (en milisegundos)
@@ -62,13 +62,22 @@ void handleReconnections(unsigned long currentMillis) {
 }
 
 void checkForUpdates() {
-    Serial.println("🔍 Verificando nueva versión en GitHub Releases...");
+    
+    if (WiFi.status() != WL_CONNECTED) {
+        Serial.println("❌ WiFi desconectado. Esperando para revisar OTA...");
+        return; 
+    }
+    // -----------------------------------
 
+    Serial.println("🔍 Verificando nueva versión en GitHub Releases...");
+    
     WiFiClientSecure client;
     client.setInsecure(); // Evita problemas de certificados SSL
 
     HTTPClient http;
     http.begin(client, githubAPIURL);
+    http.addHeader("User-Agent", "ESP32-Chiller-OTA");
+    http.addHeader("Authorization", String("Token ") + GITHUB_TOKEN);
     int httpCode = http.GET();
 
     if (httpCode == 200) {
@@ -126,6 +135,11 @@ void checkForUpdates() {
         } else {
             Serial.println("✅ El ESP32 ya tiene la versión más reciente.");
         }
+    } else if (httpCode == 403) {
+        Serial.printf("❌ Error HTTP 403 (Prohibido).\n");
+        // ¡Aquí leemos la razón exacta que nos da GitHub!
+        String errorPayload = http.getString(); 
+        Serial.println("Respuesta de GitHub: " + errorPayload);
     } else {
         Serial.printf("❌ Error HTTP %d al consultar GitHub.\n", httpCode);
     }
@@ -134,12 +148,26 @@ void checkForUpdates() {
 
 void setup() {
     Serial.begin(115200);
+    Serial.println (currentVersion); // Imprime la versión actual al iniciar
     
     // Iniciar los sensores DS18B20
     sensors.begin();
     
     setupWiFi();
+
+    // --- NUEVO: Esperar activamente al WiFi ---
+    Serial.print("Esperando asignación de IP del router");
+    while (WiFi.status() != WL_CONNECTED) {
+        delay(500);
+        Serial.print(".");
+    }
+    Serial.println("\n¡WiFi Conectado!");
+    // ------------------------------------------
+
     mqttClient.setServer(MQTT_BROKER, MQTT_PORT);
+    
+    // Forzar revisión al encender (ahora sí tiene internet)
+    checkForUpdates(); 
 }
 
 void loop() {
