@@ -7,9 +7,14 @@
 #include <HTTPClient.h>
 #include <Update.h>
 #include <ArduinoJson.h>
+#include "LittleFS.h"
+
+// Configuración de Logs
+const char* logPath = "/chiller.log";
+const size_t maxLogSize = 51200; // 50 Kilobytes de límite
 
 // --- Configuración OTA (GitHub) ---
-String currentVersion = "v1.0.1"; // ⚠️ CAMBIA ESTO EN CADA RELEASE (ej. v1.0.1, v1.0.2)
+String currentVersion = "v1.0.2"; // ⚠️ CAMBIA ESTO EN CADA RELEASE (ej. v1.0.1, v1.0.2)
 // Reemplaza con tu usuario y el nombre del repositorio que creamos
 String githubAPIURL = "https://api.github.com/repos/JesPezz/Monitor-Temperatura-Laser-C02/releases/latest";
 
@@ -146,6 +151,65 @@ void checkForUpdates() {
     http.end();
 }
 
+void writeLog(String message) {
+    // 1. Serial (Para cuando estás conectado por USB)
+    Serial.println(message);
+
+    // 2. Memoria Interna (LittleFS)
+    File logFile = LittleFS.open(logPath, FILE_APPEND);
+    if (logFile) {
+        logFile.println("[" + String(millis()/1000) + "s] " + message);
+        logFile.close();
+    }
+
+    // 3. MQTT en vivo (Para Node-RED)
+    if (mqttClient.connected()) {
+        mqttClient.publish("laser/chiller/logs", message.c_str());
+    }
+
+    // 4. Autolimpieza de memoria
+    File checkFile = LittleFS.open(logPath, FILE_READ);
+    if (checkFile && checkFile.size() > maxLogSize) {
+        checkFile.close();
+        LittleFS.remove(logPath); // Reinicia el log si se llena
+        Serial.println("♻️ Log reiniciado para cuidar la memoria flash.");
+    }
+}
+
+// --- Función para pedir el log completo vía MQTT ---
+void enviarLogCompleto() {
+    writeLog("📋 Enviando historial completo de log...");
+    File file = LittleFS.open(logPath, FILE_READ);
+    if (!file) {
+        mqttClient.publish("laser/chiller/logs/history", "Error: No hay archivo de log.");
+        return;
+    }
+
+    while (file.available()) {
+        String linea = file.readStringUntil('\n');
+        mqttClient.publish("laser/chiller/logs/history", linea.c_str());
+        delay(50); // Pequeña pausa para no saturar el buffer MQTT
+    }
+    file.close();
+    writeLog("✅ Historial enviado.");
+}
+
+// --- Modifica tu callback de MQTT (donde recibes comandos) ---
+void callback(char* topic, byte* payload, unsigned int length) {
+    String message;
+    for (int i = 0; i < length; i++) message += (char)payload[i];
+
+    if (String(topic) == "laser/chiller/cmd") {
+        if (message == "GET_LOGS") {
+            enviarLogCompleto();
+        }
+        if (message == "CLEAR_LOGS") {
+            LittleFS.remove(logPath);
+            writeLog("🗑️ Log borrado por comando remoto");
+        }
+    }
+}
+
 void setup() {
     Serial.begin(115200);
     Serial.println (currentVersion); // Imprime la versión actual al iniciar
@@ -168,6 +232,11 @@ void setup() {
     
     // Forzar revisión al encender (ahora sí tiene internet)
     checkForUpdates(); 
+
+if(!LittleFS.begin(true)){
+        Serial.println("Error al montar LittleFS");
+    }
+    writeLog("🚀 Sistema Chiller iniciado - Versión " + currentVersion);
 }
 
 void loop() {
