@@ -2,27 +2,29 @@
 #include <PubSubClient.h>
 #include <OneWire.h>
 #include <DallasTemperature.h>
-#include "secrets.h"
+#include "secrets.h" // Credenciales seguras 
 #include <WiFiClientSecure.h>
 #include <HTTPClient.h>
 #include <Update.h>
 #include <ArduinoJson.h>
 #include "LittleFS.h"
 
+// --- Configuración del LED Indicador ---
+#define LED_PIN 2 // Pin común para el LED integrado azul en ESP32 DevKit
+
 // Configuración de Logs
 const char* logPath = "/chiller.log";
 const size_t maxLogSize = 51200; // 50 Kilobytes de límite
 
 // --- Configuración OTA (GitHub) ---
-String currentVersion = "v1.0.2"; // ⚠️ CAMBIA ESTO EN CADA RELEASE (ej. v1.0.1, v1.0.2)
-// Reemplaza con tu usuario y el nombre del repositorio que creamos
+String currentVersion = "v1.0.3"; 
 String githubAPIURL = "https://api.github.com/repos/JesPezz/Monitor-Temperatura-Laser-C02/releases/latest";
 
 unsigned long lastOTACheck = 0;
-const unsigned long OTA_INTERVAL = 43200000; // Revisar cada 12 horas (en milisegundos)
+const unsigned long OTA_INTERVAL = 43200000; // Revisar cada 12 horas
 
 // --- Configuración de los Sensores DS18B20 ---
-#define ONE_WIRE_BUS 4 // ¡CAMBIO DE PIN! Usamos el GPIO 4
+#define ONE_WIRE_BUS 4 
 
 OneWire oneWire(ONE_WIRE_BUS);
 DallasTemperature sensors(&oneWire);
@@ -33,24 +35,35 @@ PubSubClient mqttClient(espClient);
 
 // --- Control de Tiempos (No Bloqueantes) ---
 unsigned long lastTempReadTime = 0;
-const unsigned long TEMP_INTERVAL = 5000; // 5 segundos
+const unsigned long TEMP_INTERVAL = 5000; 
 
 unsigned long lastMqttReconnectAttempt = 0;
-const unsigned long RECONNECT_INTERVAL = 5000; // 5 segundos
+unsigned long lastWifiReconnectAttempt = 0; 
+const unsigned long RECONNECT_INTERVAL = 5000; 
 
 unsigned long lastAlertTime = 0;
-const unsigned long ALERT_INTERVAL = 60000; // 1 minuto
-int currentAlertState = 0; // 0 = Óptimo, 1 = Advertencia, 2 = Crítico
+const unsigned long ALERT_INTERVAL = 60000; 
+int currentAlertState = 0; 
 
 void setupWiFi() {
     Serial.print("Conectando a WiFi: ");
     Serial.println(WIFI_SSID);
     WiFi.mode(WIFI_STA);
+    WiFi.disconnect(); 
+    delay(100);
     WiFi.begin(WIFI_SSID, WIFI_PASS);
 }
 
 void handleReconnections(unsigned long currentMillis) {
-    if (WiFi.status() != WL_CONNECTED) return;
+    if (WiFi.status() != WL_CONNECTED) {
+        if (currentMillis - lastWifiReconnectAttempt >= RECONNECT_INTERVAL) {
+            lastWifiReconnectAttempt = currentMillis;
+            Serial.println("WiFi perdido. Intentando reconectar...");
+            WiFi.disconnect();
+            WiFi.begin(WIFI_SSID, WIFI_PASS);
+        }
+        return; 
+    }
 
     if (!mqttClient.connected()) {
         if (currentMillis - lastMqttReconnectAttempt >= RECONNECT_INTERVAL) {
@@ -67,17 +80,21 @@ void handleReconnections(unsigned long currentMillis) {
 }
 
 void checkForUpdates() {
-    
     if (WiFi.status() != WL_CONNECTED) {
-        Serial.println("❌ WiFi desconectado. Esperando para revisar OTA...");
+        Serial.println("❌ WiFi desconectado. Omitiendo revisión OTA...");
         return; 
     }
-    // -----------------------------------
 
     Serial.println("🔍 Verificando nueva versión en GitHub Releases...");
     
+    // Parpadeo rápido doble para indicar que está consultando GitHub
+    digitalWrite(LED_PIN, HIGH); delay(100);
+    digitalWrite(LED_PIN, LOW);  delay(100);
+    digitalWrite(LED_PIN, HIGH); delay(100);
+    digitalWrite(LED_PIN, LOW);
+
     WiFiClientSecure client;
-    client.setInsecure(); // Evita problemas de certificados SSL
+    client.setInsecure(); 
 
     HTTPClient http;
     http.begin(client, githubAPIURL);
@@ -105,9 +122,7 @@ void checkForUpdates() {
             Serial.println("🚀 Nueva versión detectada. Iniciando OTA...");
             if (mqttClient.connected()) mqttClient.publish("laser/chiller/alerta", "INFO: Descargando nueva versión OTA...");
             
-            // Seguir redirecciones de GitHub (crítico para descargas)
             http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
-            
             http.begin(client, downloadURL);
             int dlCode = http.GET();
 
@@ -115,8 +130,12 @@ void checkForUpdates() {
                 int contentLength = http.getSize();
                 Serial.printf("📥 Tamaño del firmware: %d bytes\n", contentLength);
 
-                if (Update.begin(contentLength, U_FLASH)) { // Iniciar proceso de flasheo
+                if (Update.begin(contentLength, U_FLASH)) { 
                     WiFiClient *stream = http.getStreamPtr();
+                    
+                    // Mantener LED encendido fijo durante todo el proceso crítico de descarga y flasheo
+                    digitalWrite(LED_PIN, HIGH); 
+
                     size_t written = Update.writeStream(*stream);
 
                     if (written == contentLength) {
@@ -124,77 +143,82 @@ void checkForUpdates() {
                         if (Update.end()) {
                             Serial.println("✅ OTA Exitosa. Reiniciando...");
                             if (mqttClient.connected()) mqttClient.publish("laser/chiller/alerta", "ÉXITO: Sistema actualizado. Reiniciando.");
-                            delay(2000);
-                            ESP.restart(); // Reinicio automático
+                            
+                            // Parpadeo rápido de éxito antes de reiniciar
+                            for(int i=0; i<10; i++) {
+                                digitalWrite(LED_PIN, !digitalRead(LED_PIN));
+                                delay(100);
+                            }
+                            ESP.restart(); 
                         } else {
                             Serial.printf("❌ Error al finalizar: %s\n", Update.errorString());
+                            digitalWrite(LED_PIN, HIGH); // Dejar LED encendido indicando error de actualización
                         }
                     } else {
                         Serial.println("❌ Error: Firmware incompleto.");
+                        digitalWrite(LED_PIN, HIGH);
                     }
                 } else {
                     Serial.println("❌ Error de espacio para Update.begin");
+                    digitalWrite(LED_PIN, HIGH);
                 }
             }
             http.end();
         } else {
             Serial.println("✅ El ESP32 ya tiene la versión más reciente.");
+            digitalWrite(LED_PIN, LOW); // Apagar indicador al terminar con éxito sin cambios
         }
-    } else if (httpCode == 403) {
-        Serial.printf("❌ Error HTTP 403 (Prohibido).\n");
-        // ¡Aquí leemos la razón exacta que nos da GitHub!
-        String errorPayload = http.getString(); 
-        Serial.println("Respuesta de GitHub: " + errorPayload);
     } else {
         Serial.printf("❌ Error HTTP %d al consultar GitHub.\n", httpCode);
+        if (httpCode == 403) {
+            String errorPayload = http.getString(); 
+            Serial.println("Respuesta de GitHub: " + errorPayload);
+        }
     }
     http.end();
 }
 
 void writeLog(String message) {
-    // 1. Serial (Para cuando estás conectado por USB)
     Serial.println(message);
 
-    // 2. Memoria Interna (LittleFS)
     File logFile = LittleFS.open(logPath, FILE_APPEND);
     if (logFile) {
         logFile.println("[" + String(millis()/1000) + "s] " + message);
         logFile.close();
     }
 
-    // 3. MQTT en vivo (Para Node-RED)
     if (mqttClient.connected()) {
         mqttClient.publish("laser/chiller/logs", message.c_str());
     }
 
-    // 4. Autolimpieza de memoria
     File checkFile = LittleFS.open(logPath, FILE_READ);
     if (checkFile && checkFile.size() > maxLogSize) {
         checkFile.close();
-        LittleFS.remove(logPath); // Reinicia el log si se llena
+        LittleFS.remove(logPath); 
         Serial.println("♻️ Log reiniciado para cuidar la memoria flash.");
     }
 }
 
-// --- Función para pedir el log completo vía MQTT ---
 void enviarLogCompleto() {
     writeLog("📋 Enviando historial completo de log...");
     File file = LittleFS.open(logPath, FILE_READ);
     if (!file) {
-        mqttClient.publish("laser/chiller/logs/history", "Error: No hay archivo de log.");
+        if(mqttClient.connected()) mqttClient.publish("laser/chiller/logs/history", "Error: No hay archivo de log.");
         return;
     }
 
     while (file.available()) {
         String linea = file.readStringUntil('\n');
-        mqttClient.publish("laser/chiller/logs/history", linea.c_str());
-        delay(50); // Pequeña pausa para no saturar el buffer MQTT
+        if(mqttClient.connected()) {
+            mqttClient.publish("laser/chiller/logs/history", linea.c_str());
+            mqttClient.loop(); 
+        }
+        vTaskDelay(20 / portTICK_PERIOD_MS); 
     }
     file.close();
     writeLog("✅ Historial enviado.");
 }
 
-// --- Modifica tu callback de MQTT (donde recibes comandos) ---
 void callback(char* topic, byte* payload, unsigned int length) {
     String message;
     for (int i = 0; i < length; i++) message += (char)payload[i];
@@ -212,57 +236,66 @@ void callback(char* topic, byte* payload, unsigned int length) {
 
 void setup() {
     Serial.begin(115200);
-    Serial.println (currentVersion); // Imprime la versión actual al iniciar
     
-    // Iniciar los sensores DS18B20
+    // Inicializar el pin del LED
+    pinMode(LED_PIN, OUTPUT);
+    digitalWrite(LED_PIN, LOW);
+
+    Serial.println(currentVersion); 
+    
     sensors.begin();
-    
     setupWiFi();
 
-    // --- NUEVO: Esperar activamente al WiFi ---
-    Serial.print("Esperando asignación de IP del router");
-    while (WiFi.status() != WL_CONNECTED) {
+    Serial.print("Esperando asignación de IP");
+    unsigned long startAttemptTime = millis();
+    while (WiFi.status() != WL_CONNECTED && millis() - startAttemptTime < 15000) {
         delay(500);
         Serial.print(".");
     }
-    Serial.println("\n¡WiFi Conectado!");
-    // ------------------------------------------
+    
+    if (WiFi.status() == WL_CONNECTED) {
+        Serial.println("\n¡WiFi Conectado!");
+    } else {
+        Serial.println("\nError de WiFi en booteo. Iniciando de todos modos...");
+    }
 
     mqttClient.setServer(MQTT_BROKER, MQTT_PORT);
+    mqttClient.setCallback(callback); 
     
-    // Forzar revisión al encender (ahora sí tiene internet)
-    checkForUpdates(); 
-
-if(!LittleFS.begin(true)){
+    if(!LittleFS.begin(true)){
         Serial.println("Error al montar LittleFS");
     }
+    
     writeLog("🚀 Sistema Chiller iniciado - Versión " + currentVersion);
+
+    // Verificación inicial de OTA al arrancar y marcar el tiempo de referencia
+    checkForUpdates();
+    lastOTACheck = millis(); 
 }
 
 void loop() {
-    
     unsigned long currentMillis = millis();
+    
+    // Rutina de multitarea no bloqueante
     handleReconnections(currentMillis);
+    
+    if (mqttClient.connected()) mqttClient.loop();
 
-    // Revisar actualizaciones automáticamente basado en el temporizador
+    // --- REVISIÓN PERIÓDICA OTA (Cada 12 horas) ---
     if (currentMillis - lastOTACheck >= OTA_INTERVAL) {
         lastOTACheck = currentMillis;
         checkForUpdates();
     }
-    
-    if (mqttClient.connected()) mqttClient.loop();
 
+    // --- LECTURA DE TEMPERATURAS ---
     if (currentMillis - lastTempReadTime >= TEMP_INTERVAL) {
         lastTempReadTime = currentMillis;
 
-        // Mandar la orden a todos los sensores de que midan la temperatura
         sensors.requestTemperatures(); 
 
-        // Leer el Sensor 0 y el Sensor 1
         float tempIn = sensors.getTempCByIndex(0);
         float tempOut = sensors.getTempCByIndex(1);
 
-        // Validar que los sensores estén conectados (-127.0 es el error por defecto)
         if (tempIn == DEVICE_DISCONNECTED_C || tempOut == DEVICE_DISCONNECTED_C) {
             Serial.println("Error: Uno o ambos sensores DS18B20 desconectados.");
             if (mqttClient.connected()) {
@@ -271,11 +304,10 @@ void loop() {
             return;
         }
 
-        float deltaT = abs(tempOut - tempIn); // Diferencia de temperatura
+        float deltaT = abs(tempOut - tempIn); 
 
         Serial.printf("Temp Entrada: %.2f °C | Temp Salida: %.2f °C | Delta: %.2f °C\n", tempIn, tempOut, deltaT);
 
-        // Publicar por MQTT en diferentes topics
         if (mqttClient.connected()) {
             char strIn[8], strOut[8], strDelta[8];
             dtostrf(tempIn, 1, 2, strIn);
@@ -287,7 +319,6 @@ void loop() {
             mqttClient.publish("laser/chiller/delta", strDelta);
         }
 
-        // Lógica de Alarmas basada en la temperatura más alta (Salida)
         float tempMax = max(tempIn, tempOut);
 
         if (tempMax >= 25.0) {
